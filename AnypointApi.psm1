@@ -9,9 +9,11 @@
       - list / create / approve API contracts
       - list client applications (used to match consumers across Business Groups)
 
-    All calls use Bearer token authentication (Anypoint Platform personal
-    access token or a Connected App access token with the appropriate scopes:
-    "View Environment", "Manage APIs", "View Organization", "Manage Client Applications").
+    All calls use Bearer token authentication. The supported way to get that
+    token is via a Connected App's Client ID / Client Secret exchanged for an
+    access token (see Get-AnypointAccessToken below) — not a token copied out
+    of a browser's DevTools, which is a short-lived UI session token and will
+    not reliably work for scripted API calls.
 
     NOTE ON API SURFACE:
     Anypoint's Platform APIs are versioned per-tenant/per-release. The endpoints
@@ -28,6 +30,50 @@ Set-StrictMode -Version Latest
 
 $script:AnypointBaseUri = 'https://anypoint.mulesoft.com'
 
+function Get-AnypointAccessToken {
+    <#
+        .SYNOPSIS
+        Exchanges a Connected App's Client ID / Client Secret for a bearer
+        access token via the client_credentials grant. This is the
+        supported way to authenticate a script against Anypoint Platform
+        APIs (a token copied out of the browser's DevTools is a UI session
+        token and is not fit for this purpose - it expires in minutes and
+        may be scoped only for the frontend app).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ClientId,
+        [Parameter(Mandatory)][string]$ClientSecret
+    )
+
+    $body = @{
+        client_id     = $ClientId.Trim()
+        client_secret = $ClientSecret.Trim()
+        grant_type    = 'client_credentials'
+    } | ConvertTo-Json
+
+    try {
+        $response = Invoke-RestMethod -Uri "$script:AnypointBaseUri/accounts/api/v2/oauth2/token" `
+            -Method POST -ContentType 'application/json' -Body $body -ErrorAction Stop
+    }
+    catch {
+        $errorDetail = $_.ErrorDetails.Message
+        $msg = "Failed to obtain an access token from the Connected App credentials."
+        if ($errorDetail) { $msg += " $errorDetail" } else { $msg += " $($_.Exception.Message)" }
+        $msg += " Double-check the Client ID/Secret and that the Connected App is enabled with the 'client_credentials' grant."
+        throw $msg
+    }
+
+    if (-not $response.access_token) {
+        throw "Token endpoint returned no access_token. Response: $($response | ConvertTo-Json -Depth 5)"
+    }
+
+    return [pscustomobject]@{
+        AccessToken = $response.access_token
+        ExpiresIn   = $response.expires_in
+        ObtainedAt  = Get-Date
+    }
+}
+
 function Get-AnypointAuthHeader {
     <#
         .SYNOPSIS
@@ -37,8 +83,30 @@ function Get-AnypointAuthHeader {
         [Parameter(Mandatory)][string]$Token
     )
     return @{
-        'Authorization' = "Bearer $Token"
+        'Authorization' = "Bearer $($Token.Trim())"
         'Content-Type'  = 'application/json'
+    }
+}
+
+function Test-AnypointToken {
+    <#
+        .SYNOPSIS
+        Validates a token before doing anything else, so a bad/expired token
+        fails fast with a clear message instead of surfacing as a generic
+        401 deep into the script.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers
+    )
+    try {
+        Invoke-AnypointApi -Headers $Headers -Uri "$script:AnypointBaseUri/accounts/api/profile" | Out-Null
+        return $true
+    }
+    catch {
+        if ($_ -match 'HTTP 401') {
+            throw "Token was rejected (HTTP 401). This usually means: the token is expired, it's the wrong type (Personal Access Tokens are deprecated on most orgs - use a Connected App access token instead), or it was pasted with extra whitespace. Get a fresh token and try again."
+        }
+        throw
     }
 }
 
@@ -388,6 +456,6 @@ function Select-FromList {
 }
 
 Export-ModuleMember -Function `
-    Get-AnypointAuthHeader, Invoke-AnypointApi, Get-AnypointOrganizations, Get-AnypointEnvironments, `
+    Get-AnypointAccessToken, Get-AnypointAuthHeader, Test-AnypointToken, Invoke-AnypointApi, Get-AnypointOrganizations, Get-AnypointEnvironments, `
     Get-AnypointApiInstances, Get-AnypointContracts, Get-AnypointApplications, Get-AnypointTiers, `
     New-AnypointTier, New-AnypointContract, Approve-AnypointContract, Select-FromList

@@ -6,10 +6,17 @@
     Business Group on Anypoint Platform.
 
     .DESCRIPTION
-    Interactively prompts for:
-      1. Anypoint Platform bearer token
-      2. Source Business Group, source Environment, source API instance
-      3. Destination Business Group, destination Environment, destination API instance
+    Authenticates using a Connected App's Client ID / Client Secret (the
+    supported way to call Anypoint APIs from a script) exchanged for a bearer
+    access token, then prompts for:
+      1. Source Business Group, source Environment, source API instance
+      2. Destination Business Group, destination Environment, destination API instance
+
+    A token copied out of a browser's DevTools Network tab is a short-lived
+    UI session token and will not work reliably here - use a Connected App
+    instead. See README.md for how to create one. If you already have a
+    valid bearer token in hand (e.g. from your own token-issuing pipeline),
+    you can skip the Client ID/Secret exchange with -Token.
 
     SLA tiers are migrated first: every SLA tier defined on the source API
     that doesn't already exist (matched by name) on the destination API is
@@ -31,27 +38,88 @@
 
     A summary is printed to the console and exported to a timestamped CSV file.
 
+    .PARAMETER ClientId
+    Client ID of an Anypoint Connected App (client_credentials grant). If
+    omitted, and -Token is not supplied either, you'll be prompted for it.
+
+    .PARAMETER ClientSecret
+    Client Secret of the Connected App, as a SecureString. If omitted, and
+    -Token is not supplied either, you'll be prompted for it (masked input).
+
+    .PARAMETER Token
+    Use this to supply an already-obtained bearer access token directly,
+    bypassing the Client ID/Secret exchange. Must be a genuine API access
+    token (e.g. from a Connected App), not a browser session token.
+
+    .EXAMPLE
+    .\Migrate-AnypointApiContracts.ps1
+    Prompts for the Connected App Client ID and Client Secret interactively.
+
+    .EXAMPLE
+    .\Migrate-AnypointApiContracts.ps1 -ClientId 'abc123' -ClientSecret (Read-Host -AsSecureString)
+    Supplies the Client ID up front and still masks the secret prompt.
+
     .NOTES
     Requires PowerShell 5.1+ (Windows PowerShell) or PowerShell 7+.
     Only reads from the source API; does not modify or revoke anything there.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'ConnectedApp')]
 param(
+    [Parameter(ParameterSetName = 'ConnectedApp')]
+    [string]$ClientId,
+
+    [Parameter(ParameterSetName = 'ConnectedApp')]
+    [SecureString]$ClientSecret,
+
+    [Parameter(ParameterSetName = 'DirectToken')]
+    [string]$Token,
+
     [string]$OutputFolder = (Join-Path -Path (Get-Location) -ChildPath 'AnypointContractMigrationResults')
 )
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Modules\AnypointApi.psm1') -Force
 
-function Read-AnypointToken {
-    $secure = Read-Host -Prompt 'Enter your Anypoint Platform bearer token' -AsSecureString
-    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+function ConvertFrom-SecureStringPlain {
+    param([Parameter(Mandatory)][SecureString]$Secure)
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
     try {
         return [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
     } finally {
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
+}
+
+function Get-AnypointBearerToken {
+    <#
+        .SYNOPSIS
+        Resolves the bearer token to use for this run: either the -Token
+        override, or a Client ID/Secret exchange (prompting for whichever
+        of ClientId/ClientSecret wasn't passed as a parameter).
+    #>
+    param(
+        [string]$ClientId,
+        [SecureString]$ClientSecret,
+        [string]$Token
+    )
+
+    if ($Token) {
+        return $Token.Trim()
+    }
+
+    if (-not $ClientId) {
+        $ClientId = Read-Host -Prompt 'Enter the Connected App Client ID'
+    }
+    if (-not $ClientSecret) {
+        $ClientSecret = Read-Host -Prompt 'Enter the Connected App Client Secret' -AsSecureString
+    }
+    $plainSecret = ConvertFrom-SecureStringPlain -Secure $ClientSecret
+
+    Write-Host "Requesting an access token from the Connected App ..." -ForegroundColor DarkGray
+    $tokenInfo = Get-AnypointAccessToken -ClientId $ClientId -ClientSecret $plainSecret
+    Write-Host "Access token obtained (expires in $($tokenInfo.ExpiresIn)s)." -ForegroundColor DarkGray
+    return $tokenInfo.AccessToken
 }
 
 function Select-BusinessGroupEnvironmentApi {
@@ -86,9 +154,11 @@ function Select-BusinessGroupEnvironmentApi {
 # 1. Authenticate
 # ---------------------------------------------------------------------------
 Write-Host "=== Anypoint Platform Contract Migration ===" -ForegroundColor Green
-$token = Read-AnypointToken
-if ([string]::IsNullOrWhiteSpace($token)) { throw "A token is required." }
-$headers = Get-AnypointAuthHeader -Token $token
+$resolvedToken = Get-AnypointBearerToken -ClientId $ClientId -ClientSecret $ClientSecret -Token $Token
+$headers = Get-AnypointAuthHeader -Token $resolvedToken
+
+Write-Host "Validating token ..." -ForegroundColor DarkGray
+Test-AnypointToken -Headers $headers | Out-Null
 
 Write-Host "Loading Business Groups you have access to ..." -ForegroundColor DarkGray
 $organizations = Get-AnypointOrganizations -Headers $headers
