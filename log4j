@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" packages="com.mulesoft.ch.logging.appender">
+    <Appenders>
+        <!-- CrowdStrike HEC HTTP Appender -->
+        <Http name="CrowdStrikeHEC" url="https://<your-cluster>.ingest.<region>.crowdstrike.com/services/collector" method="POST">
+            <Property name="Authorization" value="Bearer ${sys:CROWDSTRIKE_HEC_TOKEN}" />
+            <Property name="Content-Type" value="application/json" />
+            
+            <!-- HEC JSON Payload Structure wrapping the Mule log line -->
+            <PatternLayout pattern="{&quot;time&quot;: %d{UNIXMillis}, &quot;event&quot;: &quot;[%t] %-5level %logger{36} - %enc{%msg}{JSON}&quot;, &quot;sourcetype&quot;: &quot;mulesoft-cloudhub&quot;}&quot;%n"/>
+        </Http>
+    </Appenders>
+
+    <Loggers>
+        <!-- Async Root Logger required by CloudHub 2.0 -->
+        <AsyncRoot level="INFO">
+            <AppenderRef ref="CrowdStrikeHEC" />
+        </AsyncRoot>
+    </Loggers>
+</Configuration>
